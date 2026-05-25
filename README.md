@@ -24,13 +24,23 @@ Scrask itself never writes to any store. No service account JSON, no OAuth, no G
 | Reminder (deadline, due date) | `task` (with due date) | `apple-reminders`, `things-mac`, `notion` |
 | Task (no date, action item) | `task` (no due date) | `apple-reminders`, `things-mac`, `notion` |
 
-High confidence (≥ 0.75) → routes silently and confirms in chat.
-Low confidence → shows a preview and asks before routing.
+Every extracted field carries its own confidence (0.0–1.0), and there are two top-level
+decision confidences too:
+
+- `actionable_confidence` — is this screenshot actually about an event or task at all?
+- `type_confidence` — is this item a calendar event, or does it belong on the task list?
+- `confidences.{field}` — how sure are we about each individual field (`title`, `date`,
+  `time`, `location`, `participants`, …)
+
+When every mandatory field is confidently extracted, Scrask routes silently and confirms in
+chat. When something is missing or shaky, it surfaces targeted clarification questions — "What
+time is dinner with Priya?" instead of a blanket "is this right?" The bot asks only what it
+actually needs to ask.
 
 A single screenshot can produce multiple items. "Let's grab coffee at Pegasus on Friday"
 yields both a calendar event (the coffee) and a prep reminder (book the table, due Thursday).
-Prep reminders are inferred — they get lower confidence and are usually shown for review
-before saving.
+Prep reminders are inferred — they get lower per-field confidences and usually trigger
+clarifications (typically `time` and `date`) before saving.
 
 Multi-day events (trips, conferences) carry `end_date` in addition to `date` so the
 destination calendar skill can set the full date range. Reschedules and cancellations are
@@ -47,7 +57,7 @@ Screenshot arrives
       ↓
   Gemini 2.0 Flash (fast, cheap)
       ↓
-  Any item confidence < 0.60?
+  Worst per-field confidence < 0.60?
   ├── No  → Done ✓
   └── Yes → Claude Opus reruns the parse
               ↓
@@ -104,7 +114,10 @@ openclaw restart
           "vision_provider": "auto",
           "fallback_threshold": 0.60,
           "timezone": "Asia/Kolkata",
-          "confidence_threshold": 0.75
+          "confidence_threshold": 0.75,
+          "actionable_threshold": 0.70,
+          "type_threshold": 0.70,
+          "field_threshold": 0.70
         }
       }
     }
@@ -142,12 +155,28 @@ the agent would route each one.
 
 ```
 scrask-bot/
-├── SKILL.md                  # OpenClaw skill instructions
-├── README.md                 # This file
+├── SKILL.md                          # OpenClaw skill instructions
+├── README.md                         # This file
+├── docs/
+│   ├── ARCHITECTURE_OVERVIEW.md      # How Scrask is built (start here)
+│   ├── decision-flow.md              # Mermaid diagrams of the parser + bot flow
+│   ├── decision-flow.html            # Same, interactive (clickable nodes)
+│   └── example-walkthrough.md        # A real conversation, end to end
 └── scripts/
-    ├── scrask_bot.py         # Vision-AI parser → structured intent JSON
-    └── requirements.txt      # Python dependencies (anthropic, google-generativeai)
+    ├── scrask_bot.py                 # Vision-AI parser → structured intent JSON
+    └── requirements.txt              # Python dependencies (anthropic, google-generativeai)
 ```
+
+New to the codebase? Start with
+[`docs/ARCHITECTURE_OVERVIEW.md`](docs/ARCHITECTURE_OVERVIEW.md) — the first
+half is written for any reader, the second half is the code-level detail.
+
+For a step-by-step picture of what happens when a screenshot lands —
+including the confidence thresholds, the Gemini→Claude fallback, the
+top-level actionable gate, and the per-field clarification loop — see
+[`docs/decision-flow.md`](docs/decision-flow.md). For a concrete
+USER ↔ BOT ↔ PARSER transcript, see
+[`docs/example-walkthrough.md`](docs/example-walkthrough.md).
 
 ---
 

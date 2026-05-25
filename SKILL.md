@@ -32,12 +32,12 @@ metadata:
       vision_provider:
         type: string
         description: >
-          'auto' = Gemini first, Claude fallback if any item confidence < fallback_threshold.
+          'auto' = Gemini first, Claude fallback if the worst per-field score is < fallback_threshold.
           'gemini' = Gemini only. 'claude' = Claude only.
         default: auto
       fallback_threshold:
         type: number
-        description: "Confidence floor for auto mode. If any item is below this, Claude reruns the parse."
+        description: "Worst per-field confidence floor for auto mode. If any per-field score drops below this, Claude reruns the parse."
         default: 0.60
       timezone:
         type: string
@@ -45,8 +45,20 @@ metadata:
         default: "UTC"
       confidence_threshold:
         type: number
-        description: "0.0–1.0. Items below this score get needs_confirmation=true and ask the user before saving."
+        description: "Legacy 0.0–1.0 per-item gate. Kept for backward-compatible callers; the new thresholds below drive clarification behaviour."
         default: 0.75
+      actionable_threshold:
+        type: number
+        description: "Top-level 'is this actually an event/task?' gate. Below this, the parser flags needs_actionable_confirmation."
+        default: 0.70
+      type_threshold:
+        type: number
+        description: "Per-item 'calendar or task list?' gate. Below this type_confidence, the parser emits a type clarification."
+        default: 0.70
+      field_threshold:
+        type: number
+        description: "Per mandatory field. Below this confidence (or null value) the parser emits a targeted clarification question for that field."
+        default: 0.70
 ---
 
 # Scrask Bot
@@ -93,7 +105,10 @@ python3 {baseDir}/scripts/scrask_bot.py \
   --image-path "<path-to-temp-image>" \
   --provider "$CONFIG_VISION_PROVIDER" \
   --timezone "$CONFIG_TIMEZONE" \
-  --confidence-threshold "$CONFIG_CONFIDENCE_THRESHOLD"
+  --confidence-threshold "$CONFIG_CONFIDENCE_THRESHOLD" \
+  --actionable-threshold "$CONFIG_ACTIONABLE_THRESHOLD" \
+  --type-threshold "$CONFIG_TYPE_THRESHOLD" \
+  --field-threshold "$CONFIG_FIELD_THRESHOLD"
 ```
 
 The script auto-resolves the API key from `GEMINI_API_KEY` (and optionally `ANTHROPIC_API_KEY`)
@@ -103,8 +118,17 @@ The script returns JSON with:
 
 - `success` — whether parsing worked
 - `no_actionable_content` — true if nothing actionable was found
-- `items[]` — one entry per detected item with `type`, `destination`, `confidence`,
-  `needs_confirmation`, plus all the extracted fields (`title`, `date`, `time`, `location`, etc.)
+- `actionable_confidence` — 0.0–1.0, how sure the parser is the screenshot is actionable
+- `needs_actionable_confirmation` — true if `actionable_confidence` is in the maybe band;
+  the bot should confirm "is this actually an event or task?" before dispatching
+- `items[]` — one entry per detected item with:
+  - `type`, `destination`, `confidence` (legacy aggregate), `type_confidence`
+  - `confidences{}` — per-field 0.0–1.0 scores (`title`, `date`, `time`, `location`,
+    `participants`, `description`, `priority`, …)
+  - `needs_confirmation` — true when there is at least one outstanding clarification
+  - `clarifications[]` — targeted questions to ask the user, e.g.
+    `{ "field": "time", "question": "What time is dinner with Priya?", "reason": "low_confidence" }`
+  - all the extracted fields (`title`, `date`, `time`, `location`, `participants`, etc.)
 - `summary_text` — chat-ready preview of what was found; send this verbatim, do not rephrase
 - `screenshot_summary`, `parse_notes` — context
 
@@ -121,7 +145,11 @@ Send the `summary_text` value back to the user on the same chat surface. Then pr
 
 For every item in `items[]`:
 
-**If `needs_confirmation: false` (high confidence):**
+**If `needs_actionable_confirmation: true` (top level):**
+Send `summary_text` (which already opens with "Is this actually an event or task?") and wait for
+the user. On "yes", proceed item-by-item below. On "no", reply "Got it, skipped ✓" and stop.
+
+**For each item — if `needs_confirmation: false` (no outstanding clarifications):**
 Invoke the appropriate destination skill **without** asking the user first.
 
 - `destination: "calendar"` → invoke the user's installed calendar skill. Preference order:
@@ -129,17 +157,24 @@ Invoke the appropriate destination skill **without** asking the user first.
 - `destination: "task"` → invoke the user's installed task skill. Preference order:
   `apple-reminders` → `things-mac` → `notion` → first available.
 
-Pass the item fields (`title`, `date`, `time`, `end_time`, `end_date`, `location`, `description`,
-`recurrence`, `online_link`, etc.) to whatever creation command that skill exposes. If `end_date`
-is present and different from `date`, treat the item as a multi-day event.
+Pass the item fields (`title`, `date`, `time`, `end_time`, `end_date`, `location`, `participants`,
+`description`, `recurrence`, `online_link`, etc.) to whatever creation command that skill exposes.
+If `end_date` is present and different from `date`, treat the item as a multi-day event.
 
-**If `needs_confirmation: true` (low confidence):**
-The `summary_text` already includes a preview and a `Save it? Reply **yes**, **edit**, or **skip**.`
-prompt. Wait for the user's response:
+**For each item — if `needs_confirmation: true`:**
+The `clarifications[]` array lists the specific things to ask. Each entry has:
+- `field` — which field needs clarification (e.g. `"time"`, `"date"`, `"type"`)
+- `question` — the user-facing question (already pre-formatted with the item title)
+- `reason` — `"missing"` (value is null) or `"low_confidence"` (extracted but uncertain) or
+  `"low_type_confidence"` (unsure whether this is a calendar event or a task)
 
-- **"yes" / "save" / "add"** → route to the destination skill as above.
-- **"edit"** → ask what to change, update the relevant field, then route.
-- **"skip" / "no"** → reply: "Got it, skipped ✓"
+The `summary_text` already renders these as a bullet list. Ask the user the questions in order
+and patch the corresponding fields with their replies. Once every clarification is resolved,
+route the item to the destination skill as above. If the user says **skip** at any point, drop
+the item and confirm "Got it, skipped ✓".
+
+For the special case of `field: "type"`, the user's reply determines whether the item routes to
+`calendar` or `task` — update `destination` accordingly before dispatch.
 
 ### Step 5: Confirm Saves
 
@@ -156,7 +191,7 @@ If the destination skill errors, surface the error and ask whether to retry with
 | Scenario | Behavior |
 |---|---|
 | Single screenshot has both an event and a task | Process each independently; route to its own destination. |
-| Event implies a prep step (e.g. dinner at a restaurant → book table) | The parser emits BOTH an event and a prep reminder (confidence 0.65–0.80). Most prep reminders will hit `needs_confirmation: true`, so the user reviews before saving. |
+| Event implies a prep step (e.g. dinner at a restaurant → book table) | The parser emits BOTH an event and a prep reminder. Inferred fields on the prep reminder land in the 0.65–0.80 band, so most prep reminders hit `needs_confirmation: true` with targeted clarifications (typically `time` and `date`). |
 | Multi-day event (trip, conference) | `end_date` is set and differs from `date`. Pass both to the calendar skill (e.g. `calctl add --date --end-date --all-day`). |
 | Rescheduled / cancelled event | Parser extracts the NEW date; `parse_notes` flags it as a reschedule. Confirm with user before overwriting any existing entry. |
 | Screenshot is in Hindi, Tamil, or another language | Title and description are already in English; `language` holds the ISO code. Save as-is. |
@@ -183,7 +218,10 @@ If the destination skill errors, surface the error and ask whether to retry with
           "vision_provider": "auto",
           "fallback_threshold": 0.60,
           "timezone": "Asia/Kolkata",
-          "confidence_threshold": 0.75
+          "confidence_threshold": 0.75,
+          "actionable_threshold": 0.70,
+          "type_threshold": 0.70,
+          "field_threshold": 0.70
         }
       }
     }

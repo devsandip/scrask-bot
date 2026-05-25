@@ -54,9 +54,34 @@ MIME_TYPES = {
     ".webp": "image/webp",
 }
 
-DEFAULT_CONFIDENCE_THRESHOLD = 0.75
-FALLBACK_THRESHOLD           = 0.60
+DEFAULT_CONFIDENCE_THRESHOLD = 0.75   # legacy per-item gate (kept for backward compat)
+FALLBACK_THRESHOLD           = 0.60   # Gemini→Claude fallback trigger (worst per-field score)
 FALLBACK_IMPROVEMENT_MIN     = 0.05
+
+ACTIONABLE_THRESHOLD         = 0.70   # below → emit a top-level "is this actionable?" clarification
+TYPE_THRESHOLD               = 0.70   # below → emit a "calendar or task list?" clarification
+FIELD_THRESHOLD              = 0.70   # below (or value=null) for a mandatory field → field clarification
+
+# Mandatory field lists per item type — drive clarification generation in shape_intent.
+MANDATORY_FIELDS_BY_TYPE = {
+    "event":    ["title", "date", "time"],
+    "reminder": ["title", "date", "time"],
+    "task":     ["title"],
+}
+
+# Templates for clarification questions, keyed by field name. {title} is the item title
+# (or "this item" if title is missing/empty).
+CLARIFICATION_QUESTIONS = {
+    "title":        "What should I call this?",
+    "date":         "What date is {title}?",
+    "time":         "What time is {title}?",
+    "end_time":     "When does {title} end?",
+    "location":     "Where is {title}?",
+    "participants": "Who is going to {title}?",
+    "description":  "Any details I should add for {title}?",
+    "priority":     "How urgent is {title}?",
+    "type":         "Should {title} go on your calendar or task list?",
+}
 
 CLAUDE_MODEL = "claude-opus-4-6"
 GEMINI_MODEL = "gemini-2.0-flash"
@@ -76,10 +101,11 @@ email screenshot, social media post, chat message, event flyer, or booking confi
 Extract ALL actionable information — calendar events AND task-like asks — and return a single JSON object:
 
 {{
+  "actionable_confidence": 0.0-1.0,
   "items": [
     {{
       "type": "event" | "reminder" | "task",
-      "confidence": 0.0-1.0,
+      "type_confidence": 0.0-1.0,
       "title": "concise title in English (max 60 chars)",
       "date": "YYYY-MM-DD or null",
       "time": "HH:MM (24h) or null",
@@ -88,13 +114,24 @@ Extract ALL actionable information — calendar events AND task-like asks — an
       "timezone_hint": "IANA timezone or offset string, or null",
       "location": "physical address or venue name or null",
       "online_link": "Zoom/Meet/Teams URL or null",
+      "participants": ["string", ...] or null,
       "recurrence": "none | daily | weekly | monthly | yearly",
       "recurrence_day": "e.g. Tuesday or null",
       "description": "1-2 sentence context summary in English or null",
       "priority": "high | medium | low",
       "source_type": "whatsapp | email | social_media | chat | flyer | booking | other",
       "language": "ISO 639-1 code of the screenshot text",
-      "already_in_calendar_hint": true | false
+      "already_in_calendar_hint": true | false,
+      "confidences": {{
+        "title":        0.0-1.0,
+        "date":         0.0-1.0,
+        "time":         0.0-1.0,
+        "end_time":     0.0-1.0,
+        "location":     0.0-1.0,
+        "participants": 0.0-1.0,
+        "description":  0.0-1.0,
+        "priority":     0.0-1.0
+      }}
     }}
   ],
   "screenshot_summary": "one sentence describing what this screenshot shows",
@@ -159,7 +196,15 @@ Prep reminder timing:
 - Due date = day before the event, OR same day several hours before event time — whichever
   is more realistic for the prep type. Restaurant reservations → due day before or morning of.
 - Copy venue and event date into the reminder title. Reference the event in description.
-- Prep reminders are inferred — set confidence 0.65–0.80 and note in parse_notes.
+- Prep reminders are inferred — set type_confidence and the relevant field confidences in
+  the 0.65–0.80 band, and note the inference in parse_notes.
+
+Participants:
+- Extract named people the screenshot mentions as attending/invited (e.g. "lunch with Priya and Anika"
+  → ["Priya", "Anika"]). Do NOT invent names. If no one is named, set participants to null.
+- The sender of a chat message is a participant only if the message implies they will attend (e.g.
+  "Priya: let's grab coffee" → Priya is a participant; "Priya: don't forget the meeting" is not).
+- Participants are NEVER mandatory; missing participants is normal.
 
 Examples (always two items for these patterns):
 - "lets grab coffee at Pegasus on friday" →
@@ -174,11 +219,40 @@ no_actionable_content:
   code/error screenshots, and shopping lists with no dates are not actionable.
 - "Send me your resume" IS actionable — it is a task.
 
-Confidence scoring:
-- 0.9–1.0  All key fields present, no ambiguity
-- 0.75–0.9 Most fields present, minor inference (relative date, inferred year)
-- 0.5–0.75 Date, type, or time required meaningful guesswork
-- < 0.5    Very little usable info — still emit the item if something actionable exists
+Confidence scoring (per-field + two decisions):
+
+Score each confidence on this scale:
+- 0.9–1.0  Directly visible in the screenshot, no inference needed
+- 0.75–0.9 Minor inference (relative date resolved, year inferred from context)
+- 0.5–0.75 Meaningful guesswork (vague phrasing, partial info, approximate values)
+- < 0.5    Very little usable info — emit the field anyway if you have a best guess
+
+actionable_confidence (top-level, 0.0–1.0):
+- How sure are you the screenshot contains AT LEAST one actionable event/reminder/task.
+- 0.9+ for clear invites, bookings, explicit asks. 0.6–0.8 for ambiguous chat that might
+  imply a plan. < 0.5 when the screenshot looks like content with no real ask. Pair a low
+  score here with no_actionable_content=true only when you are confident there is nothing.
+
+type_confidence (per item, 0.0–1.0):
+- How sure are you about the type (event vs reminder vs task) for THIS item.
+- High when the screenshot makes the distinction obvious (clear time + venue → event).
+- Low (0.5–0.7) when the line between reminder and task is fuzzy, or between event and
+  reminder is unclear (e.g. "lunch with mom tomorrow" — event or reminder?).
+
+confidences (per field, 0.0–1.0 each):
+- title:        was the title obvious in the text, or did you summarize/translate heavily?
+- date:         explicit date → high; relative ("next Friday") → 0.75–0.9; vague → 0.5–0.75.
+- time:         explicit time → high; "around 7" / "7ish" → 0.55–0.7; "evening" → 0.5–0.65.
+- end_time:     present in source → high; inferred from duration → 0.6–0.8; absent → 0.0.
+- location:     full address → high; venue name only → 0.7–0.85; absent or guessed → low.
+- participants: names directly mentioned → high; inferred from group context → 0.6–0.75;
+                no participants found → 0.0.
+- description:  rephrased from source → 0.8+; heavily inferred → 0.5–0.7; absent → 0.0.
+- priority:     explicit ("urgent", "ASAP") → high; tone-inferred → 0.5–0.7; absent → 0.0.
+
+Only include a key in `confidences` for fields you actually extracted. Omit keys for fields
+you set to null AND did not attempt to infer. A field with a non-null value MUST have a
+confidence entry.
 
 Current date: {today}
 User timezone: {timezone}
@@ -276,7 +350,7 @@ def parse_screenshot(
 def _parse_with_auto_fallback(image_base64, media_type, timezone, gemini_api_key, claude_api_key):
     gemini_result = parse_with_gemini(image_base64, media_type, gemini_api_key, timezone)
     gemini_items  = gemini_result.get("items", [])
-    gemini_min    = min((i.get("confidence", 0) for i in gemini_items), default=1.0)
+    gemini_min    = _min_confidence(gemini_items)
     gemini_avg    = _avg_confidence(gemini_items)
 
     fallback_triggered = gemini_min < FALLBACK_THRESHOLD and bool(claude_api_key)
@@ -315,10 +389,41 @@ def _parse_with_auto_fallback(image_base64, media_type, timezone, gemini_api_key
     return gemini_result
 
 
+def _item_confidence_values(item: dict) -> list[float]:
+    """
+    Collect every confidence-style score associated with one item:
+    per-field `confidences{}` values, `type_confidence`, and the legacy
+    item-level `confidence` if present. Used to compute min/avg across an
+    entire parse result for auto-fallback decisions.
+    """
+    values: list[float] = []
+    confidences = item.get("confidences") or {}
+    for v in confidences.values():
+        if isinstance(v, (int, float)):
+            values.append(float(v))
+    for key in ("type_confidence", "confidence"):
+        v = item.get(key)
+        if isinstance(v, (int, float)):
+            values.append(float(v))
+    return values
+
+
+def _min_confidence(items: list[dict]) -> float:
+    """Worst per-field (or per-decision) score across all items. Defaults to 1.0 if nothing is scored."""
+    all_scores: list[float] = []
+    for item in items:
+        all_scores.extend(_item_confidence_values(item))
+    return min(all_scores) if all_scores else 1.0
+
+
 def _avg_confidence(items: list[dict]) -> float:
-    if not items:
+    """Average across every per-field and per-decision score in the result."""
+    all_scores: list[float] = []
+    for item in items:
+        all_scores.extend(_item_confidence_values(item))
+    if not all_scores:
         return 0.0
-    return sum(i.get("confidence", 0) for i in items) / len(items)
+    return sum(all_scores) / len(all_scores)
 
 
 def _clean_and_parse_json(raw: str) -> dict:
@@ -328,7 +433,12 @@ def _clean_and_parse_json(raw: str) -> dict:
 
 # ─── Intent shaping ────────────────────────────────────────────────────────────
 
-def shape_intent(item: dict, confidence_threshold: float) -> dict:
+def shape_intent(
+    item: dict,
+    confidence_threshold: float,
+    type_threshold: float = TYPE_THRESHOLD,
+    field_threshold: float = FIELD_THRESHOLD,
+) -> dict:
     """
     Turn one raw model item into a normalized intent the OpenClaw agent can
     route to a destination skill.
@@ -336,16 +446,76 @@ def shape_intent(item: dict, confidence_threshold: float) -> dict:
     `destination` is the *kind* of skill needed, not a specific provider:
       - "calendar"  → calctl / accli / brainz-calendar / etc.
       - "task"      → apple-reminders / things-mac / notion / etc.
+
+    Confidence handling:
+      - Per-field confidences come from `item["confidences"]`.
+      - The legacy per-item `confidence` (if the model emits one) is honoured;
+        otherwise we synthesize it as `min(confidences.values())`.
+      - `needs_confirmation` is now driven by the clarifications list: any
+        outstanding clarification flips it true. `confidence_threshold` is kept
+        as a final fallback for callers that pass an item with neither a
+        `confidences` block nor a `confidence` value.
+      - `clarifications` lists the specific things to ask the user about.
     """
-    confidence  = item.get("confidence", 0.0)
     item_type   = item.get("type", "task")
     destination = "calendar" if item_type == "event" else "task"
+    confidences = item.get("confidences") or {}
+
+    # Legacy per-item confidence: honour model-emitted value, else derive.
+    if "confidence" in item and isinstance(item["confidence"], (int, float)):
+        confidence = float(item["confidence"])
+    elif confidences:
+        confidence = min(confidences.values())
+    else:
+        confidence = 0.0
+
+    type_confidence = float(item.get("type_confidence", confidence))
+
+    title = item.get("title") or "this item"
+    clarifications: list[dict] = []
+
+    # Type-level clarification first (so it leads the list in the bot UI).
+    if type_confidence < type_threshold:
+        clarifications.append({
+            "field":    "type",
+            "question": CLARIFICATION_QUESTIONS["type"].format(title=title),
+            "reason":   "low_type_confidence",
+        })
+
+    # Per mandatory-field clarifications.
+    mandatory = MANDATORY_FIELDS_BY_TYPE.get(item_type, MANDATORY_FIELDS_BY_TYPE["task"])
+    for field in mandatory:
+        value = item.get(field)
+        is_missing = value is None or value == ""
+        field_conf = confidences.get(field)
+
+        if is_missing:
+            reason = "missing"
+        elif field_conf is not None and field_conf < field_threshold:
+            reason = "low_confidence"
+        else:
+            continue
+
+        template = CLARIFICATION_QUESTIONS.get(field, f"What is the {field}?")
+        clarifications.append({
+            "field":    field,
+            "question": template.format(title=title),
+            "reason":   reason,
+        })
+
+    # Final fallback: legacy per-item gate (only kicks in if no per-field info exists).
+    needs_confirmation = bool(clarifications) or (
+        not confidences and confidence < confidence_threshold
+    )
 
     return {
         "type":                     item_type,
         "destination":              destination,
         "confidence":               confidence,
-        "needs_confirmation":       confidence < confidence_threshold,
+        "type_confidence":          type_confidence,
+        "confidences":              confidences,
+        "needs_confirmation":       needs_confirmation,
+        "clarifications":           clarifications,
         "title":                    item.get("title"),
         "date":                     item.get("date"),
         "time":                     item.get("time"),
@@ -354,6 +524,7 @@ def shape_intent(item: dict, confidence_threshold: float) -> dict:
         "timezone_hint":            item.get("timezone_hint"),
         "location":                 item.get("location"),
         "online_link":              item.get("online_link"),
+        "participants":             item.get("participants"),
         "recurrence":               item.get("recurrence", "none"),
         "recurrence_day":           item.get("recurrence_day"),
         "description":              item.get("description"),
@@ -366,10 +537,19 @@ def shape_intent(item: dict, confidence_threshold: float) -> dict:
 
 # ─── Human-readable summary ────────────────────────────────────────────────────
 
-def format_summary(items: list[dict], parse_data: dict, provider: str) -> str:
+def format_summary(
+    items: list[dict],
+    parse_data: dict,
+    provider: str,
+    needs_actionable_confirmation: bool = False,
+    actionable_confidence: float | None = None,
+) -> str:
     """
     Chat-agnostic preview the agent can relay back to the user via whatever
     transport they came in on. The agent should send this verbatim.
+
+    For confirm items, render the specific clarification questions emitted by
+    shape_intent rather than a generic "is this right?" prompt.
     """
     if not items:
         return (
@@ -378,6 +558,12 @@ def format_summary(items: list[dict], parse_data: dict, provider: str) -> str:
         )
 
     lines = []
+
+    if needs_actionable_confirmation:
+        pct = f" ({int(actionable_confidence * 100)}% sure)" if actionable_confidence is not None else ""
+        lines.append(f"🤔 Is this actually an event or task?{pct}")
+        lines.append("Reply **yes** to continue, or **no** to skip.\n")
+
     silent  = [i for i in items if not i["needs_confirmation"]]
     confirm = [i for i in items if i["needs_confirmation"]]
 
@@ -391,26 +577,40 @@ def format_summary(items: list[dict], parse_data: dict, provider: str) -> str:
             lines.append(f"{icon} Task: **{i['title']}**{due}")
 
     for i in confirm:
-        lines.append(f"\n🤔 Not sure about this one (confidence: {int(i['confidence']*100)}%)")
+        lines.append(f"\n🤔 Need a quick check on **{i['title'] or 'this one'}**")
+
+        # Show what we got so far so the user has context.
         if i["destination"] == "calendar":
-            lines.append("📅 **Event detected**")
-            lines.append(f"  Title: {i['title']}")
+            lines.append("📅 Event so far:")
+            lines.append(f"  Title: {i['title'] or '?'}")
             lines.append(f"  Date:  {i.get('date') or '?'}")
             lines.append(f"  Time:  {i.get('time') or '?'}")
             if i.get("location"):
                 lines.append(f"  Where: {i['location']}")
             if i.get("online_link"):
                 lines.append(f"  Link:  {i['online_link']}")
+            if i.get("participants"):
+                lines.append(f"  With:  {', '.join(i['participants'])}")
         else:
             icon  = "🔔" if i.get("date") else "✅"
             label = "Reminder" if i.get("date") else "Task"
-            lines.append(f"{icon} **{label} detected**")
-            lines.append(f"  Title: {i['title']}")
+            lines.append(f"{icon} {label} so far:")
+            lines.append(f"  Title: {i['title'] or '?'}")
             if i.get("date"):
                 lines.append(f"  Due:   {i['date']}")
+
         if i.get("description"):
             lines.append(f"  Note:  {i['description']}")
-        lines.append("\nSave it? Reply **yes**, **edit**, or **skip**.")
+
+        # The actual clarification questions.
+        clarifications = i.get("clarifications") or []
+        if clarifications:
+            lines.append("\nI need to confirm:")
+            for c in clarifications:
+                lines.append(f"  • {c['question']}")
+            lines.append("\nReply with the details, or **skip** to drop this one.")
+        else:
+            lines.append("\nSave it? Reply **yes**, **edit**, or **skip**.")
 
     if parse_data.get("parse_notes"):
         lines.append(f"\n_ℹ️ {parse_data['parse_notes']}_")
@@ -434,7 +634,7 @@ def main() -> None:
         "--provider",
         choices=["auto", "claude", "gemini"],
         default=os.environ.get("VISION_PROVIDER", "auto"),
-        help="'auto' (default) = Gemini first, Claude fallback if confidence < 0.6.",
+        help="'auto' (default) = Gemini first, Claude fallback if worst per-field score < 0.6.",
     )
     parser.add_argument(
         "--api-key",
@@ -450,7 +650,29 @@ def main() -> None:
         "--confidence-threshold",
         type=float,
         default=DEFAULT_CONFIDENCE_THRESHOLD,
-        help="Items below this score are flagged needs_confirmation=true (default 0.75).",
+        help="Legacy per-item gate (default 0.75). The new behaviour uses field/type/actionable "
+             "thresholds below — this one is kept for backward-compatible callers.",
+    )
+    parser.add_argument(
+        "--actionable-threshold",
+        type=float,
+        default=ACTIONABLE_THRESHOLD,
+        help="Below this top-level actionable_confidence the parser asks 'is this actually an "
+             "event/task?' (default 0.70).",
+    )
+    parser.add_argument(
+        "--type-threshold",
+        type=float,
+        default=TYPE_THRESHOLD,
+        help="Below this per-item type_confidence the parser asks 'calendar or task list?' "
+             "(default 0.70).",
+    )
+    parser.add_argument(
+        "--field-threshold",
+        type=float,
+        default=FIELD_THRESHOLD,
+        help="Per mandatory field: below this confidence (or null value) the parser asks a "
+             "targeted clarification question for that field (default 0.70).",
     )
     parser.add_argument(
         "--media-type",
@@ -499,17 +721,22 @@ def main() -> None:
     except Exception as e:
         exit_error(f"Error during parsing: {e}")
 
-    provider_used = parse_data.get("_provider_used", args.provider)
-    raw_items     = parse_data.get("items", [])
+    provider_used         = parse_data.get("_provider_used", args.provider)
+    raw_items             = parse_data.get("items", [])
+    actionable_confidence = parse_data.get("actionable_confidence")
+    if not isinstance(actionable_confidence, (int, float)):
+        actionable_confidence = None
 
     if parse_data.get("no_actionable_content") or not raw_items:
         print(json.dumps({
-            "success":               True,
-            "no_actionable_content": True,
-            "provider":              provider_used,
-            "fallback_triggered":    parse_data.get("_fallback_triggered", False),
-            "screenshot_summary":    parse_data.get("screenshot_summary", ""),
-            "items":                 [],
+            "success":                       True,
+            "no_actionable_content":         True,
+            "provider":                      provider_used,
+            "fallback_triggered":            parse_data.get("_fallback_triggered", False),
+            "screenshot_summary":            parse_data.get("screenshot_summary", ""),
+            "actionable_confidence":         actionable_confidence,
+            "needs_actionable_confirmation": False,
+            "items":                         [],
             "summary_text": (
                 "🤷 I couldn't find any event, reminder, or task in that screenshot.\n"
                 "Could you describe what you'd like to add?"
@@ -517,22 +744,44 @@ def main() -> None:
         }, indent=2, ensure_ascii=False))
         return
 
-    items = [shape_intent(it, args.confidence_threshold) for it in raw_items]
+    items = [
+        shape_intent(
+            it,
+            args.confidence_threshold,
+            type_threshold=args.type_threshold,
+            field_threshold=args.field_threshold,
+        )
+        for it in raw_items
+    ]
+
+    # Top-level "is this actually actionable?" gate. If the model emitted items
+    # but is unsure the screenshot is actionable at all, flag it so the bot can
+    # confirm before dispatching.
+    needs_actionable_confirmation = (
+        actionable_confidence is not None
+        and actionable_confidence < args.actionable_threshold
+    )
 
     print(json.dumps({
-        "success":                    True,
-        "no_actionable_content":      False,
-        "provider":                   provider_used,
-        "fallback_triggered":         parse_data.get("_fallback_triggered", False),
-        "gemini_avg_confidence":      parse_data.get("_gemini_avg_conf"),
-        "claude_avg_confidence":      parse_data.get("_claude_avg_conf"),
-        "confidence_gain":            parse_data.get("_confidence_gain"),
-        "screenshot_summary":         parse_data.get("screenshot_summary", ""),
-        "items_found":                len(items),
-        "items_needing_confirmation": sum(1 for i in items if i["needs_confirmation"]),
-        "items":                      items,
-        "summary_text":               format_summary(items, parse_data, provider_used),
-        "parse_notes":                parse_data.get("parse_notes"),
+        "success":                       True,
+        "no_actionable_content":         False,
+        "provider":                      provider_used,
+        "fallback_triggered":            parse_data.get("_fallback_triggered", False),
+        "gemini_avg_confidence":         parse_data.get("_gemini_avg_conf"),
+        "claude_avg_confidence":         parse_data.get("_claude_avg_conf"),
+        "confidence_gain":               parse_data.get("_confidence_gain"),
+        "screenshot_summary":            parse_data.get("screenshot_summary", ""),
+        "actionable_confidence":         actionable_confidence,
+        "needs_actionable_confirmation": needs_actionable_confirmation,
+        "items_found":                   len(items),
+        "items_needing_confirmation":    sum(1 for i in items if i["needs_confirmation"]),
+        "items":                         items,
+        "summary_text":                  format_summary(
+            items, parse_data, provider_used,
+            needs_actionable_confirmation=needs_actionable_confirmation,
+            actionable_confidence=actionable_confidence,
+        ),
+        "parse_notes":                   parse_data.get("parse_notes"),
     }, indent=2, ensure_ascii=False))
 
 

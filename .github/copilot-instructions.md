@@ -13,7 +13,8 @@ Help contributors and AI agents quickly understand and modify the Scrask skill (
 
 ## Important constants & edit points
 - Prompts: `SYSTEM_PROMPT` and `USER_PROMPT_TEMPLATE` in `scrask_bot.py`. The script expects Claude to return raw JSON; keep the system prompt strict (JSON-only).
-- Thresholds: `CONFIDENCE_THRESHOLD`, `DEFAULT_EVENT_DURATION`, `DEFAULT_REMINDER_LEAD` constants are declared near the top of `scrask_bot.py`.
+- Thresholds: `DEFAULT_CONFIDENCE_THRESHOLD` (legacy per-item gate), `FALLBACK_THRESHOLD` (Gemini→Claude trigger), `FALLBACK_IMPROVEMENT_MIN`, `ACTIONABLE_THRESHOLD`, `TYPE_THRESHOLD`, and `FIELD_THRESHOLD` are declared near the top of `scrask_bot.py`. The last three drive clarification generation; below each threshold the parser asks a targeted question rather than confirming the whole item.
+- Mandatory fields per type live in `MANDATORY_FIELDS_BY_TYPE`; clarification question templates live in `CLARIFICATION_QUESTIONS`. Both are next to the threshold constants.
 - Google behavior: `get_google_services()` builds Calendar + Tasks clients. Google libs are optional at import-time; missing Google libs produce a helpful runtime error.
 
 ## Environment & config
@@ -47,14 +48,41 @@ python3 scrask_bot.py \
 ```
 {
   "type": "event",
-  "confidence": 0.92,
+  "destination": "calendar",
+  "confidence": 0.90,
+  "type_confidence": 0.95,
   "title": "Team Standup",
   "date": "2026-03-01",
   "time": "09:00",
   "timezone_hint": "Asia/Kolkata",
   "location": "Zoom",
   "online_link": "https://zoom.us/meeting/abc",
-  "recurrence": "weekly"
+  "participants": ["Priya", "Anika"],
+  "recurrence": "weekly",
+  "confidences": {
+    "title": 0.95,
+    "date": 0.92,
+    "time": 0.90,
+    "location": 0.88,
+    "participants": 0.75
+  },
+  "clarifications": [],
+  "needs_confirmation": false
+}
+```
+And one that triggers a clarification:
+```
+{
+  "type": "event",
+  "destination": "calendar",
+  "title": "Coffee at Pegasus",
+  "date": "2026-03-06",
+  "time": null,
+  "confidences": { "title": 0.85, "date": 0.80, "time": 0.0 },
+  "clarifications": [
+    { "field": "time", "question": "What time is Coffee at Pegasus?", "reason": "missing" }
+  ],
+  "needs_confirmation": true
 }
 ```
 
