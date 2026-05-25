@@ -104,7 +104,7 @@ Do not make the user wait silently.
 ### Step 2: Run the Parser
 
 ```bash
-python3 ~/.openclaw/skills/scrask-bot/scripts/scrask_bot.py \
+python3 {baseDir}/scripts/scrask_bot.py \
   --image-path "<path-to-temp-image>" \
   --provider "$CONFIG_VISION_PROVIDER" \
   --timezone "$CONFIG_TIMEZONE" \
