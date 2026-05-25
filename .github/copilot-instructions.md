@@ -17,18 +17,11 @@ Quick orientation for contributors and AI agents working on the Scrask skill (sc
 - Model IDs: `GEMINI_MODEL = "gemini-2.0-flash"`, `CLAUDE_MODEL = "claude-opus-4-6"`. Change these constants if upgrading.
 
 ## Important constants & edit points
-<<<<<<< Updated upstream
-- Prompts: `SYSTEM_PROMPT` and `USER_PROMPT_TEMPLATE` in `scrask_bot.py`. The script expects Claude to return raw JSON; keep the system prompt strict (JSON-only).
-- Thresholds: `DEFAULT_CONFIDENCE_THRESHOLD` (legacy per-item gate), `FALLBACK_THRESHOLD` (Gemini→Claude trigger), `FALLBACK_IMPROVEMENT_MIN`, `ACTIONABLE_THRESHOLD`, `TYPE_THRESHOLD`, and `FIELD_THRESHOLD` are declared near the top of `scrask_bot.py`. The last three drive clarification generation; below each threshold the parser asks a targeted question rather than confirming the whole item.
-- Mandatory fields per type live in `MANDATORY_FIELDS_BY_TYPE`; clarification question templates live in `CLARIFICATION_QUESTIONS`. Both are next to the threshold constants.
-- Google behavior: `get_google_services()` builds Calendar + Tasks clients. Google libs are optional at import-time; missing Google libs produce a helpful runtime error.
-=======
 - Prompts: `SYSTEM_PROMPT` and `USER_PROMPT_TEMPLATE` near the top of `scrask_bot.py`. The model must return raw JSON only — keep the system prompt strict.
 - Thresholds: `DEFAULT_CONFIDENCE_THRESHOLD` (0.75), `FALLBACK_THRESHOLD` (0.60), `FALLBACK_IMPROVEMENT_MIN` (0.05).
 - Intent shape: `shape_intent()` produces the per-item dict the agent consumes. It sets `destination` to `"calendar"` if `type == "event"`, else `"task"`. `needs_confirmation` is `confidence < threshold`.
 - Output assembly: `main()` prints a top-level JSON object with `success`, `no_actionable_content`, `provider`, `fallback_triggered`, `items[]`, `summary_text`, `parse_notes`, plus optional diagnostic fields (`gemini_avg_confidence`, `claude_avg_confidence`, `confidence_gain`).
 - Human-readable preview: `format_summary()` builds `summary_text`. SKILL.md instructs the agent to send this verbatim — preserve its structure when changing.
->>>>>>> Stashed changes
 
 ## Environment & config
 - Required: `GEMINI_API_KEY` (for `auto` and `gemini` modes).
@@ -68,13 +61,8 @@ CLI flags: `--image-path` or `--image-base64` (mutually exclusive, one required)
 {
   "type": "event",
   "destination": "calendar",
-<<<<<<< Updated upstream
-  "confidence": 0.90,
-  "type_confidence": 0.95,
-=======
   "confidence": 0.92,
   "needs_confirmation": false,
->>>>>>> Stashed changes
   "title": "Team Standup",
   "date": "2026-03-01",
   "time": "09:00",
@@ -83,34 +71,6 @@ CLI flags: `--image-path` or `--image-base64` (mutually exclusive, one required)
   "timezone_hint": "Asia/Kolkata",
   "location": "Zoom",
   "online_link": "https://zoom.us/meeting/abc",
-<<<<<<< Updated upstream
-  "participants": ["Priya", "Anika"],
-  "recurrence": "weekly",
-  "confidences": {
-    "title": 0.95,
-    "date": 0.92,
-    "time": 0.90,
-    "location": 0.88,
-    "participants": 0.75
-  },
-  "clarifications": [],
-  "needs_confirmation": false
-}
-```
-And one that triggers a clarification:
-```
-{
-  "type": "event",
-  "destination": "calendar",
-  "title": "Coffee at Pegasus",
-  "date": "2026-03-06",
-  "time": null,
-  "confidences": { "title": 0.85, "date": 0.80, "time": 0.0 },
-  "clarifications": [
-    { "field": "time", "question": "What time is Coffee at Pegasus?", "reason": "missing" }
-  ],
-  "needs_confirmation": true
-=======
   "recurrence": "weekly",
   "recurrence_day": "Monday",
   "description": "Daily team sync",
@@ -118,7 +78,6 @@ And one that triggers a clarification:
   "source_type": "email",
   "language": "en",
   "already_in_calendar_hint": false
->>>>>>> Stashed changes
 }
 ```
 
