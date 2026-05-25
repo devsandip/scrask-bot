@@ -28,7 +28,13 @@ High confidence (≥ 0.75) → routes silently and confirms in chat.
 Low confidence → shows a preview and asks before routing.
 
 A single screenshot can produce multiple items. "Let's grab coffee at Pegasus on Friday"
-yields both a calendar event (the coffee) and a task (book the table).
+yields both a calendar event (the coffee) and a prep reminder (book the table, due Thursday).
+Prep reminders are inferred — they get lower confidence and are usually shown for review
+before saving.
+
+Multi-day events (trips, conferences) carry `end_date` in addition to `date` so the
+destination calendar skill can set the full date range. Reschedules and cancellations are
+detected and flagged in `parse_notes`.
 
 ---
 

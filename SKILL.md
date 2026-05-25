@@ -129,8 +129,9 @@ Invoke the appropriate destination skill **without** asking the user first.
 - `destination: "task"` → invoke the user's installed task skill. Preference order:
   `apple-reminders` → `things-mac` → `notion` → first available.
 
-Pass the item fields (`title`, `date`, `time`, `location`, `description`, `recurrence`, etc.)
-to whatever creation command that skill exposes.
+Pass the item fields (`title`, `date`, `time`, `end_time`, `end_date`, `location`, `description`,
+`recurrence`, `online_link`, etc.) to whatever creation command that skill exposes. If `end_date`
+is present and different from `date`, treat the item as a multi-day event.
 
 **If `needs_confirmation: true` (low confidence):**
 The `summary_text` already includes a preview and a `Save it? Reply **yes**, **edit**, or **skip**.`
@@ -155,7 +156,10 @@ If the destination skill errors, surface the error and ask whether to retry with
 | Scenario | Behavior |
 |---|---|
 | Single screenshot has both an event and a task | Process each independently; route to its own destination. |
-| Screenshot is in Hindi, Tamil, or another language | Extract and translate silently; save title in English. |
+| Event implies a prep step (e.g. dinner at a restaurant → book table) | The parser emits BOTH an event and a prep reminder (confidence 0.65–0.80). Most prep reminders will hit `needs_confirmation: true`, so the user reviews before saving. |
+| Multi-day event (trip, conference) | `end_date` is set and differs from `date`. Pass both to the calendar skill (e.g. `calctl add --date --end-date --all-day`). |
+| Rescheduled / cancelled event | Parser extracts the NEW date; `parse_notes` flags it as a reschedule. Confirm with user before overwriting any existing entry. |
+| Screenshot is in Hindi, Tamil, or another language | Title and description are already in English; `language` holds the ISO code. Save as-is. |
 | Recurring event ("every Monday") | Pass `recurrence` and `recurrence_day` to the calendar skill. |
 | Date has already passed | Flag in the reply: "⚠️ This date has already passed. Save anyway?" |
 | Screenshot of someone's calendar | `already_in_calendar_hint: true` — reply: "Looks like this is already in your calendar 🗓️" and skip. |
