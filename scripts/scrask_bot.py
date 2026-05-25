@@ -71,7 +71,7 @@ SYSTEM_PROMPT = (
 )
 
 USER_PROMPT_TEMPLATE = """Analyze this screenshot carefully. It may be a WhatsApp forward,
-email screenshot, social media post, or chat message received via any chat app.
+email screenshot, social media post, chat message, event flyer, or booking confirmation.
 
 Extract ALL actionable information — calendar events AND task-like asks — and return a single JSON object:
 
@@ -80,18 +80,19 @@ Extract ALL actionable information — calendar events AND task-like asks — an
     {{
       "type": "event" | "reminder" | "task",
       "confidence": 0.0-1.0,
-      "title": "concise title (max 60 chars)",
+      "title": "concise title in English (max 60 chars)",
       "date": "YYYY-MM-DD or null",
       "time": "HH:MM (24h) or null",
       "end_time": "HH:MM (24h) or null",
-      "timezone_hint": "detected timezone string or null",
+      "end_date": "YYYY-MM-DD or null (multi-day events only; null if same day as date)",
+      "timezone_hint": "IANA timezone or offset string, or null",
       "location": "physical address or venue name or null",
       "online_link": "Zoom/Meet/Teams URL or null",
       "recurrence": "none | daily | weekly | monthly | yearly",
       "recurrence_day": "e.g. Tuesday or null",
-      "description": "1-2 sentence context summary or null",
+      "description": "1-2 sentence context summary in English or null",
       "priority": "high | medium | low",
-      "source_type": "whatsapp | email | social_media | chat | flyer | other",
+      "source_type": "whatsapp | email | social_media | chat | flyer | booking | other",
       "language": "ISO 639-1 code of the screenshot text",
       "already_in_calendar_hint": true | false
     }}
@@ -102,22 +103,82 @@ Extract ALL actionable information — calendar events AND task-like asks — an
 }}
 
 Classification rules:
-- "event"    → specific date+time OR a venue/link; social or external gathering. Goes to a calendar.
-- "reminder" → deadline/due date; personal action item with a date. Goes to a task list with a due date.
-- "task"     → no date at all; pure to-do or action item (e.g. "send me your resume"). Goes to a task list.
+- "event"    → scheduled gathering with a date (time optional if all-day), OR a venue/link with an
+               inferred date. Social meetups, invites, flights, hotel check-ins. Goes to a calendar.
+- "reminder" → personal action with a deadline or due date (date required; time optional).
+               Bills, submissions, prep steps before an event ("book the table", "buy a gift").
+               Goes to a task list with a due date.
+- "task"     → action item with no date at all (e.g. "send me your resume"). Goes to a task list.
 
-A single screenshot may produce multiple items — e.g. "lets grab coffee at Pegasus on friday"
-yields BOTH an event (the coffee meetup) AND a task (book the table).
+Date and time inference (anchor on Current date and User timezone below):
+- Resolve relative phrases: tomorrow, next Friday, this Sunday, in 2 weeks, next month, etc.
+- If month/day already passed this year, assume next year unless context implies otherwise.
+- Default to User timezone when none is stated; put explicit or detected zones in timezone_hint.
+- All-day: date present, no specific time → type "event", time null, end_time null.
+- Reminder with due time: type "reminder", set both date and time.
+- Time ranges ("2–4 pm"): time = start, end_time = end on the same date.
+- Approximate times ("around 7", "7ish"): pick best guess, lower confidence, note in parse_notes.
+- Dual timezone ("3 pm EST / 12 pm PST"): use the time matching User timezone; note the other in parse_notes.
+- Vague deadlines ("EOD", "end of week", "ASAP"): infer best date/time, lower confidence, explain in parse_notes.
 
-A screenshot is "no_actionable_content" only if there is no event, reminder, or task in it.
-A meme, a random photo, or pure venting with no ask is not actionable. A request like
-"send me your resume" IS actionable — it is a task.
+Per source type:
+- whatsapp / chat: informal wording; "lets meet fri" may need date inference — lower confidence accordingly.
+- email: look for structured invite blocks, organizer, venue, Meet/Zoom links — often high confidence.
+- social_media / flyer: poster dates may lack year; venue-heavy → event even without time (lower confidence).
+- booking: flights, trains, hotels — extract the primary actionable datetime (departure, check-in);
+           put confirmation numbers and secondary times in description.
+- Reschedule or cancellation notices: extract the NEW date/time if rescheduled; type "event" or "reminder"
+  as appropriate; note "reschedule" or "cancellation" in parse_notes.
+
+Translation:
+- If screenshot text is not English, set language to its ISO 639-1 code.
+- Always write title and description in English regardless of source language.
+
+already_in_calendar_hint:
+- Set true when the screenshot IS a calendar app view, agenda, or existing event listing — not a new invite.
+
+Multi-item rules:
+- One screenshot may yield multiple items. Split when actions, dates, or intents differ.
+  Do not merge unrelated items into one.
+
+Event + implied prep (always emit BOTH when the pattern applies):
+- When a social plan at a venue implies a prep step the user must do beforehand, emit TWO items:
+  1) type "event" — the gathering itself (date, time, location from the message)
+  2) type "reminder" — the prep action, due BEFORE the event (see timing below)
+- Trigger when the plan implies prep even if not stated explicitly:
+  • restaurant / bar / cafe dinner or drinks → book a table or reservation
+  • travel (flight, train, trip) → check in, pack, arrange transport
+  • party, wedding, hosted event → RSVP, buy gift, arrange outfit
+  • meeting with external person at a venue → confirm or book if needed
+- Do NOT split when prep is unnecessary or already done:
+  • casual "come over to my place" — event only
+  • message already includes a confirmation number or "booked" / "confirmed"
+  • explicit single intent ("see you at 7" with no venue booking implied)
+
+Prep reminder timing:
+- Due date = day before the event, OR same day several hours before event time — whichever
+  is more realistic for the prep type. Restaurant reservations → due day before or morning of.
+- Copy venue and event date into the reminder title. Reference the event in description.
+- Prep reminders are inferred — set confidence 0.65–0.80 and note in parse_notes.
+
+Examples (always two items for these patterns):
+- "lets grab coffee at Pegasus on friday" →
+    event:    "Coffee at Pegasus" — date Friday, time inferred or null
+    reminder: "Book table at Pegasus" — due Thursday (or Friday morning)
+- "lets go for dinner at Olive Garden on friday evening" →
+    event:    "Dinner at Olive Garden" — date Friday, time ~19:00, location Olive Garden
+    reminder: "Book reservation at Olive Garden" — due Thursday (or Friday before 17:00)
+
+no_actionable_content:
+- true only when there is no event, reminder, or task. Memes, scenery, pure venting with no ask,
+  code/error screenshots, and shopping lists with no dates are not actionable.
+- "Send me your resume" IS actionable — it is a task.
 
 Confidence scoring:
 - 0.9–1.0  All key fields present, no ambiguity
-- 0.75–0.9 Most fields present, minor inference needed
-- 0.5–0.75 Date or type is uncertain
-- < 0.5    Very little usable info
+- 0.75–0.9 Most fields present, minor inference (relative date, inferred year)
+- 0.5–0.75 Date, type, or time required meaningful guesswork
+- < 0.5    Very little usable info — still emit the item if something actionable exists
 
 Current date: {today}
 User timezone: {timezone}
@@ -289,6 +350,7 @@ def shape_intent(item: dict, confidence_threshold: float) -> dict:
         "date":                     item.get("date"),
         "time":                     item.get("time"),
         "end_time":                 item.get("end_time"),
+        "end_date":                 item.get("end_date"),
         "timezone_hint":            item.get("timezone_hint"),
         "location":                 item.get("location"),
         "online_link":              item.get("online_link"),
@@ -296,6 +358,7 @@ def shape_intent(item: dict, confidence_threshold: float) -> dict:
         "recurrence_day":           item.get("recurrence_day"),
         "description":              item.get("description"),
         "priority":                 item.get("priority", "medium"),
+        "source_type":              item.get("source_type"),
         "language":                 item.get("language"),
         "already_in_calendar_hint": item.get("already_in_calendar_hint", False),
     }
