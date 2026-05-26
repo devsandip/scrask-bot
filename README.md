@@ -18,6 +18,10 @@ already have installed.
 
 Scrask itself never writes to any store. No service account JSON, no OAuth, no Google dev keys.
 
+### Invocation
+
+Scrask uses a hybrid invocation model. By default, the OpenClaw agent routes screenshots to Scrask automatically based on the trigger conditions in [`SKILL.md`](SKILL.md). If you want to force it to run on an ambiguous image, or if the agent misses an obvious one, you can invoke it explicitly with any of these aliases at the start of your message: `scrask`, `scrask this`, `screenshot`, `screenshot to calendar` (with or without `@` or `/` prefix). See the `## Invocation` section of `SKILL.md` for the full rules.
+
 | Detected type | Destination kind | Example destination skills |
 |---|---|---|
 | Event (date + time / venue / invite link) | `calendar` | `calctl`, `accli`, `apple-calendar`, `brainz-calendar`, `gcal-pro` |

@@ -5,6 +5,11 @@ Quick orientation for contributors and AI agents working on the Scrask skill (sc
 - Scrask is an OpenClaw skill that parses screenshots and emits structured intent JSON. **It does not write to any calendar or task store itself.** The OpenClaw agent reads the JSON and delegates each item to whichever destination skill the user has installed (`calctl`, `accli`, `apple-calendar`, `brainz-calendar`, `gcal-pro`, `apple-reminders`, `things-mac`, `notion`, etc.).
 - Flow: chat surface (Telegram / iMessage / Slack / …) sends an image → `scripts/scrask_bot.py` parses with Gemini and optionally Claude → prints JSON to stdout → OpenClaw routes each `items[]` entry by its `destination` field.
 
+## Invocation (v4.3+)
+- Hybrid model: implicit by default, explicit override on demand.
+- Implicit: agent reads `SKILL.md` `## Invocation` prose and decides based on image content (screenshot vs photo, no other skill claimed, etc.).
+- Explicit: `metadata.openclaw.invocation.aliases` lists strings (`scrask`, `scrask this`, `screenshot`, `screenshot to calendar`) that force-dispatch to this skill regardless of implicit conditions. Platform must check aliases first, falling back to implicit only when no alias matches.
+
 ## Key files
 - `scripts/scrask_bot.py` — the entire implementation: prompts, provider routing, auto-fallback logic, intent shaping, summary formatting. Single file. Edit prompts and thresholds here.
 - `SKILL.md` — OpenClaw skill manifest plus the step-by-step instructions the agent follows (acknowledge → run parser → route items → confirm).
