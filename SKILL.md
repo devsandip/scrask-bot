@@ -1,6 +1,6 @@
 ---
 name: scrask-bot
-version: 4.2.0
+version: 4.3.0
 description: >
   When the user sends a screenshot via any chat surface (Telegram, iMessage, Slack, etc.),
   parse it for events and tasks using OpenClaw's configured vision LLM by default, with
@@ -11,6 +11,18 @@ author: sandip
 metadata:
   openclaw:
     emoji: "🦞"
+    # Invocation: implicit by default (agent reads the Trigger Conditions section
+    # of this manifest and routes), with explicit override via the aliases below.
+    # If any alias appears at the start of a user message (with or without `@`
+    # or `/` prefix), the platform must dispatch to scrask regardless of the
+    # implicit trigger conditions.
+    invocation:
+      mode: hybrid              # 'implicit' | 'explicit' | 'hybrid'
+      aliases:
+        - scrask
+        - "scrask this"
+        - screenshot
+        - "screenshot to calendar"
     # No mandatory env vars. Default 'auto' provider routing uses OpenClaw's
     # configured vision LLM when no skill-level keys are set, so the skill works
     # out of the box.
@@ -89,17 +101,46 @@ they have wired into OpenClaw (Telegram, iMessage, Slack, etc.). Scrask:
 Scrask never writes to a store directly. No service account JSON, no OAuth, no API keys for the
 calendar/task layer — that's the destination skill's job.
 
-## Trigger Conditions
+## Invocation
 
-Activate when:
+Scrask is invoked in two ways. The platform tries explicit invocation first; if no alias matches, it falls back to the implicit trigger conditions.
+
+### Explicit override (checked first)
+
+If the user message begins with any of these aliases (case-insensitive, with or without a `@` or `/` prefix), the platform dispatches to Scrask regardless of the implicit conditions below:
+
+- `scrask`
+- `scrask this`
+- `screenshot`
+- `screenshot to calendar`
+
+Examples that force-route to Scrask:
+
+- `scrask this` (with an attached image)
+- `@scrask` (with an attached image)
+- `/scrask` (with an attached image)
+- `screenshot to calendar` (with an attached image)
+
+When invoked explicitly with no image attached, Scrask responds with a brief prompt asking the user to attach a screenshot, then stops. Do not run the parser without an image.
+
+### Implicit (default, used when no alias matches)
+
+The OpenClaw agent reads the incoming message and activates Scrask when:
+
 1. The user sends a message in any connected chat surface that contains an **image attachment**.
 2. The image appears to be a **screenshot** — not a photo of a person, place, or physical object.
 3. No other skill has already claimed the image.
 
-Do not activate for:
+Do not activate (implicitly) for:
+
 - Photos of people, places, food, scenery.
 - Screenshots of code, errors, or UI bugs (leave for other skills).
 - Images the user explicitly asks to edit, describe, or analyze for another purpose.
+
+The implicit path is the one users will hit by default. The explicit aliases exist for two cases:
+
+1. **Debugging / power-user override** — force Scrask to run on an ambiguous image the agent would otherwise route elsewhere (or skip).
+2. **Recovery** — if the agent misses an obvious screenshot, the user can recover with `scrask this` instead of resending.
 
 ## Step-by-Step Instructions
 

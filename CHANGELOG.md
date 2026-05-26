@@ -5,6 +5,40 @@ All notable changes to Scrask are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.3.0] - 2026-05-25
+
+### Added
+
+- **Hybrid invocation model.** Scrask is now invoked implicitly by
+  default (the OpenClaw agent reads `## Invocation` in `SKILL.md` and
+  routes screenshots automatically) AND can be explicitly invoked by
+  the user with any of the new aliases:
+  - `scrask`
+  - `scrask this`
+  - `screenshot`
+  - `screenshot to calendar`
+
+  Aliases work with or without `@` / `/` prefixes. The platform must
+  check explicit aliases first; if none matches, fall back to the
+  implicit trigger conditions.
+- **New `invocation` block in the manifest** (`metadata.openclaw`):
+  declares `mode: hybrid` and the alias list. This is the declarative
+  contract the platform consumes to know which strings should
+  force-dispatch to Scrask.
+
+### Changed
+
+- **`SKILL.md` "Trigger Conditions" section renamed and rewritten** as
+  `## Invocation`. Documents both modes side by side with explicit
+  examples and a brief rationale for when each path fires.
+
+### Compatibility
+
+- **Fully backward compatible.** The implicit trigger conditions are
+  preserved verbatim under the `Implicit (default…)` subheading. Any
+  agent that has been reading the old prose continues to behave
+  exactly the same. The aliases simply add a second, more direct path.
+
 ## [4.2.0] - 2026-05-25
 
 ### Added
