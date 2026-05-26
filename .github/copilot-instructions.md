@@ -12,9 +12,12 @@ Quick orientation for contributors and AI agents working on the Scrask skill (sc
 - `scripts/requirements.txt` — runtime deps (`anthropic`, `google-generativeai`).
 
 ## Providers and auto-fallback
-- Default provider is `auto`: Gemini 2.0 Flash runs first; if any item's confidence is below `FALLBACK_THRESHOLD` (0.60) and `ANTHROPIC_API_KEY` is set, Claude Opus reruns the parse. Claude's result is kept only if `claude_avg - gemini_avg >= FALLBACK_IMPROVEMENT_MIN` (0.05); otherwise Gemini's result is retained.
-- Three entry points in `scrask_bot.py`: `parse_with_gemini`, `parse_with_claude`, `_parse_with_auto_fallback`. The router is `parse_screenshot`.
-- Model IDs: `GEMINI_MODEL = "gemini-2.0-flash"`, `CLAUDE_MODEL = "claude-opus-4-6"`. Change these constants if upgrading.
+- Default provider is `auto`, credential-aware:
+  - `GEMINI_API_KEY` set → Gemini 2.0 Flash first; if worst per-field confidence is below `FALLBACK_THRESHOLD` (0.60) and `ANTHROPIC_API_KEY` is set, Claude Opus reruns. Claude's result is kept only if `claude_avg - gemini_avg >= FALLBACK_IMPROVEMENT_MIN` (0.05); otherwise Gemini's result is retained.
+  - Only `ANTHROPIC_API_KEY` set → Claude directly.
+  - Neither set → defer to OpenClaw's configured vision LLM via the platform-injected env vars `OPENCLAW_VISION_PROVIDER` (`"anthropic"` or `"google"`), `OPENCLAW_VISION_KEY`, and optional `OPENCLAW_VISION_MODEL`.
+- Four entry points in `scrask_bot.py`: `parse_with_gemini`, `parse_with_claude`, `parse_with_openclaw`, plus the auto routers `_parse_with_auto` (credential routing) and `_parse_with_gemini_claude_fallback` (the v4.1 Gemini→Claude path). The public router is `parse_screenshot`.
+- Default model IDs: `GEMINI_MODEL = "gemini-2.0-flash"`, `CLAUDE_MODEL = "claude-opus-4-6"`. OpenClaw can override via `OPENCLAW_VISION_MODEL` per-call.
 
 ## Important constants & edit points
 - Prompts: `SYSTEM_PROMPT` and `USER_PROMPT_TEMPLATE` near the top of `scrask_bot.py`. The model must return raw JSON only — keep the system prompt strict.
@@ -24,8 +27,10 @@ Quick orientation for contributors and AI agents working on the Scrask skill (sc
 - Human-readable preview: `format_summary()` builds `summary_text`. SKILL.md instructs the agent to send this verbatim — preserve its structure when changing.
 
 ## Environment & config
-- Required: `GEMINI_API_KEY` (for `auto` and `gemini` modes).
-- Optional: `ANTHROPIC_API_KEY` (enables Claude fallback in `auto`, required for `claude`).
+- All credential env vars are OPTIONAL since v4.2. The skill works out of the box on any OpenClaw install with a vision-capable LLM configured at the platform level.
+- `GEMINI_API_KEY` — enables Gemini-first routing in `auto`, and required if pinned via `--provider gemini`.
+- `ANTHROPIC_API_KEY` — enables Claude fallback in `auto` (or Claude-only if no Gemini key), and required if pinned via `--provider claude`.
+- `OPENCLAW_VISION_PROVIDER` / `OPENCLAW_VISION_KEY` / `OPENCLAW_VISION_MODEL` — injected by OpenClaw. Used in `openclaw` mode and as the auto-mode fallback when no skill-level key is set.
 - Other env vars: `VISION_PROVIDER` (default `auto`), `USER_TIMEZONE` (default `UTC`).
 - Skill-level config in `SKILL.md`: `vision_provider`, `fallback_threshold`, `timezone`, `confidence_threshold`. Keep these defaults in sync with the constants in `scrask_bot.py` when changing behavior.
 
@@ -43,7 +48,7 @@ python3 scripts/scrask_bot.py \
   --timezone "Asia/Kolkata"
 ```
 
-CLI flags: `--image-path` or `--image-base64` (mutually exclusive, one required), `--provider {auto|claude|gemini}`, `--api-key` (override), `--timezone`, `--confidence-threshold`, `--media-type`.
+CLI flags: `--image-path` or `--image-base64` (mutually exclusive, one required), `--provider {auto|openclaw|claude|gemini}`, `--api-key` (override), `--timezone`, `--confidence-threshold`, `--actionable-threshold`, `--type-threshold`, `--field-threshold`, `--media-type`.
 
 ## Conventions when extending
 - The model contract is defined in `USER_PROMPT_TEMPLATE`. When you add a field, update both the prompt schema **and** `shape_intent()` so the field reaches the downstream agent. If it should appear in the chat preview, also touch `format_summary()`.

@@ -14,9 +14,12 @@ Usage:
   python scrask_bot.py --image-base64 <base64> [--provider auto|claude|gemini]
 
 Env vars:
-  GEMINI_API_KEY     — required for 'auto' and 'gemini' modes
-  ANTHROPIC_API_KEY  — optional; enables Claude fallback in 'auto' mode
-  VISION_PROVIDER    — 'auto' (default), 'claude', or 'gemini' (overridden by --provider)
+  GEMINI_API_KEY            — optional; enables Gemini-first 'auto' routing and 'gemini' mode
+  ANTHROPIC_API_KEY         — optional; enables Claude fallback and 'claude' mode
+  OPENCLAW_VISION_PROVIDER  — injected by OpenClaw; 'anthropic' or 'google'
+  OPENCLAW_VISION_KEY       — injected by OpenClaw; key for the platform-configured LLM
+  OPENCLAW_VISION_MODEL     — injected by OpenClaw; optional model name override
+  VISION_PROVIDER           — 'auto' (default), 'openclaw', 'claude', or 'gemini' (overridden by --provider)
 
 Requirements:
   pip install -r requirements.txt
@@ -262,13 +265,19 @@ Return only JSON. No markdown. No explanation."""
 
 # ─── Provider: Claude ──────────────────────────────────────────────────────────
 
-def parse_with_claude(image_base64: str, media_type: str, api_key: str, timezone: str = "UTC") -> dict:
+def parse_with_claude(
+    image_base64: str,
+    media_type: str,
+    api_key: str,
+    timezone: str = "UTC",
+    model: str | None = None,
+) -> dict:
     if not CLAUDE_AVAILABLE:
         raise RuntimeError("anthropic package not installed. Run: pip install anthropic")
 
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
-        model=CLAUDE_MODEL,
+        model=model or CLAUDE_MODEL,
         max_tokens=1500,
         system=SYSTEM_PROMPT,
         messages=[{
@@ -285,12 +294,18 @@ def parse_with_claude(image_base64: str, media_type: str, api_key: str, timezone
 
 # ─── Provider: Gemini ──────────────────────────────────────────────────────────
 
-def parse_with_gemini(image_base64: str, media_type: str, api_key: str, timezone: str = "UTC") -> dict:
+def parse_with_gemini(
+    image_base64: str,
+    media_type: str,
+    api_key: str,
+    timezone: str = "UTC",
+    model: str | None = None,
+) -> dict:
     if not GEMINI_AVAILABLE:
         raise RuntimeError("google-generativeai package not installed. Run: pip install google-generativeai")
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name=GEMINI_MODEL, system_instruction=SYSTEM_PROMPT)
+    model = genai.GenerativeModel(model_name=model or GEMINI_MODEL, system_instruction=SYSTEM_PROMPT)
 
     image_bytes = base64.standard_b64decode(image_base64)
     image_part  = {"mime_type": media_type, "data": image_bytes}
@@ -313,6 +328,59 @@ def parse_with_gemini(image_base64: str, media_type: str, api_key: str, timezone
     return _clean_and_parse_json(raw)
 
 
+# ─── Provider: OpenClaw (use whatever vision LLM the platform has configured) ──
+
+# OpenClaw injects these env vars into skill subprocesses so individual skills
+# can call the user's configured vision LLM without each shipping its own keys.
+# The skill stays vision-provider-agnostic; the platform decides which model
+# (Claude / Gemini / future providers) is actually used.
+OPENCLAW_PROVIDER_ENV = "OPENCLAW_VISION_PROVIDER"   # "anthropic" | "google" | future
+OPENCLAW_KEY_ENV      = "OPENCLAW_VISION_KEY"        # API key for that provider
+OPENCLAW_MODEL_ENV    = "OPENCLAW_VISION_MODEL"      # optional model override
+
+
+def _openclaw_vision_available() -> bool:
+    """True iff the platform has injected both a provider name and a key."""
+    return bool(
+        os.environ.get(OPENCLAW_PROVIDER_ENV)
+        and os.environ.get(OPENCLAW_KEY_ENV)
+    )
+
+
+def parse_with_openclaw(image_base64: str, media_type: str, timezone: str = "UTC") -> dict:
+    """
+    Use OpenClaw's configured vision LLM. The platform injects the provider
+    name, key, and optional model override via env vars; we route to the
+    matching provider function.
+
+    No skill-level API key needed when this path is used — that is the whole
+    point of openclaw mode.
+    """
+    provider_name = (os.environ.get(OPENCLAW_PROVIDER_ENV) or "").lower().strip()
+    api_key       = os.environ.get(OPENCLAW_KEY_ENV)
+    model_name    = os.environ.get(OPENCLAW_MODEL_ENV) or None
+
+    if not provider_name or not api_key:
+        raise RuntimeError(
+            "OpenClaw has no vision-capable LLM configured for skills. "
+            f"Either configure one at the platform level (which sets "
+            f"{OPENCLAW_PROVIDER_ENV} and {OPENCLAW_KEY_ENV}), or set "
+            f"GEMINI_API_KEY / ANTHROPIC_API_KEY and pick that provider "
+            f"explicitly via --provider."
+        )
+
+    if provider_name == "anthropic":
+        return parse_with_claude(image_base64, media_type, api_key, timezone, model=model_name)
+
+    if provider_name == "google":
+        return parse_with_gemini(image_base64, media_type, api_key, timezone, model=model_name)
+
+    raise RuntimeError(
+        f"OpenClaw vision provider '{provider_name}' is not supported by Scrask. "
+        "Supported values: 'anthropic', 'google'."
+    )
+
+
 # ─── Provider router ───────────────────────────────────────────────────────────
 
 def parse_screenshot(
@@ -323,7 +391,13 @@ def parse_screenshot(
     claude_api_key: str | None = None,
     gemini_api_key: str | None = None,
 ) -> dict:
-    provider = provider.lower().strip()
+    provider = (provider or "auto").lower().strip()
+
+    if provider == "openclaw":
+        result = parse_with_openclaw(image_base64, media_type, timezone)
+        result["_provider_used"]      = "openclaw"
+        result["_fallback_triggered"] = False
+        return result
 
     if provider == "claude":
         result = parse_with_claude(image_base64, media_type, claude_api_key, timezone)
@@ -338,16 +412,51 @@ def parse_screenshot(
         return result
 
     if provider == "auto":
-        return _parse_with_auto_fallback(
+        return _parse_with_auto(
             image_base64, media_type, timezone,
             gemini_api_key=gemini_api_key,
             claude_api_key=claude_api_key,
         )
 
-    raise ValueError(f"Unknown provider '{provider}'. Choose 'auto', 'claude', or 'gemini'.")
+    raise ValueError(
+        f"Unknown provider '{provider}'. Choose 'auto', 'openclaw', 'claude', or 'gemini'."
+    )
 
 
-def _parse_with_auto_fallback(image_base64, media_type, timezone, gemini_api_key, claude_api_key):
+def _parse_with_auto(image_base64, media_type, timezone, gemini_api_key, claude_api_key):
+    """
+    Smart routing based on which credentials are available at runtime.
+
+    Priority order:
+      1. GEMINI_API_KEY set → Gemini-first with Claude fallback (the cheap+fast path).
+         This is the existing v4.1 behaviour. Users who set up Gemini explicitly
+         keep getting it.
+      2. ANTHROPIC_API_KEY set (and no Gemini key) → Claude only. No point routing
+         through OpenClaw if the user has already paid for direct Claude access.
+      3. Neither → OpenClaw's configured vision LLM. Works out of the box for any
+         user who has set up OpenClaw with a vision-capable LLM.
+    """
+    if gemini_api_key:
+        return _parse_with_gemini_claude_fallback(
+            image_base64, media_type, timezone,
+            gemini_api_key=gemini_api_key,
+            claude_api_key=claude_api_key,
+        )
+
+    if claude_api_key:
+        result = parse_with_claude(image_base64, media_type, claude_api_key, timezone)
+        result["_provider_used"]      = "claude"
+        result["_fallback_triggered"] = False
+        return result
+
+    # No skill-level keys configured — defer to the platform.
+    result = parse_with_openclaw(image_base64, media_type, timezone)
+    result["_provider_used"]      = "openclaw"
+    result["_fallback_triggered"] = False
+    return result
+
+
+def _parse_with_gemini_claude_fallback(image_base64, media_type, timezone, gemini_api_key, claude_api_key):
     gemini_result = parse_with_gemini(image_base64, media_type, gemini_api_key, timezone)
     gemini_items  = gemini_result.get("items", [])
     gemini_min    = _min_confidence(gemini_items)
@@ -632,9 +741,14 @@ def main() -> None:
 
     parser.add_argument(
         "--provider",
-        choices=["auto", "claude", "gemini"],
+        choices=["auto", "openclaw", "claude", "gemini"],
         default=os.environ.get("VISION_PROVIDER", "auto"),
-        help="'auto' (default) = Gemini first, Claude fallback if worst per-field score < 0.6.",
+        help=(
+            "'auto' (default) routes by what you have: GEMINI_API_KEY → "
+            "Gemini-first with Claude fallback; else ANTHROPIC_API_KEY → "
+            "Claude only; else 'openclaw' (the platform's configured vision "
+            "LLM). 'openclaw' / 'claude' / 'gemini' pin a specific provider."
+        ),
     )
     parser.add_argument(
         "--api-key",
@@ -685,15 +799,34 @@ def main() -> None:
     claude_api_key = args.api_key or os.environ.get("ANTHROPIC_API_KEY")
     gemini_api_key = args.api_key or os.environ.get("GEMINI_API_KEY")
 
+    openclaw_available = _openclaw_vision_available()
+
     if args.provider == "claude" and not claude_api_key:
         exit_error("Missing ANTHROPIC_API_KEY for Claude provider.")
     if args.provider == "gemini" and not gemini_api_key:
         exit_error("Missing GEMINI_API_KEY for Gemini provider.")
-    if args.provider == "auto" and not gemini_api_key:
-        exit_error("Auto mode requires GEMINI_API_KEY at minimum. ANTHROPIC_API_KEY enables Claude fallback.")
-    if args.provider == "auto" and not claude_api_key:
+    if args.provider == "openclaw" and not openclaw_available:
+        exit_error(
+            "OpenClaw provider needs the platform to inject "
+            f"{OPENCLAW_PROVIDER_ENV} and {OPENCLAW_KEY_ENV}. "
+            "Either configure a vision LLM at the platform level, or pick "
+            "a different --provider."
+        )
+    if args.provider == "auto" and not (gemini_api_key or claude_api_key or openclaw_available):
+        exit_error(
+            "Auto mode requires at least one of: GEMINI_API_KEY, "
+            "ANTHROPIC_API_KEY, or a vision LLM configured at the OpenClaw "
+            "platform level."
+        )
+    if args.provider == "auto" and gemini_api_key and not claude_api_key:
         print(
-            "⚠️  ANTHROPIC_API_KEY not set. Auto mode will use Gemini only (no Claude fallback).",
+            "ℹ️  ANTHROPIC_API_KEY not set. Auto mode will use Gemini only (no Claude fallback).",
+            file=sys.stderr,
+        )
+    if args.provider == "auto" and not gemini_api_key and not claude_api_key and openclaw_available:
+        print(
+            "ℹ️  Using OpenClaw's configured vision LLM. Set GEMINI_API_KEY for cheap+fast "
+            "Gemini routing, or ANTHROPIC_API_KEY for direct Claude.",
             file=sys.stderr,
         )
 
