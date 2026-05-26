@@ -50,25 +50,42 @@ detected and flagged in `parse_notes`.
 
 ## Provider Strategy
 
-By default, Scrask uses **auto mode**: Gemini first, Claude fallback.
+Scrask works out of the box with whatever vision LLM you have configured at
+the OpenClaw platform level. Setting `GEMINI_API_KEY` or `ANTHROPIC_API_KEY`
+is optional and only changes the routing.
 
 ```
 Screenshot arrives
       ↓
-  Gemini 2.0 Flash (fast, cheap)
+  --provider (default: auto)
       ↓
-  Worst per-field confidence < 0.60?
-  ├── No  → Done ✓
-  └── Yes → Claude Opus reruns the parse
-              ↓
-          Claude avg confidence > Gemini + 0.05?
-          ├── Yes → Use Claude result ✓
-          └── No  → Gemini result was fine, keep it ✓
+   ┌──────────────────────────────────────────────┐
+   │  auto mode routes by what you have:          │
+   │                                              │
+   │  GEMINI_API_KEY set?                         │
+   │  ├── Yes → Gemini 2.0 Flash (fast, cheap)    │
+   │  │         → if worst per-field < 0.60       │
+   │  │            and ANTHROPIC_API_KEY set      │
+   │  │            → Claude Opus reruns           │
+   │  │            → keep Claude only if avg      │
+   │  │              improvement ≥ 0.05           │
+   │  │                                           │
+   │  ├── No, ANTHROPIC_API_KEY set?              │
+   │  │     → Yes → Claude only                   │
+   │  │                                           │
+   │  └── No to both?                             │
+   │       → Use OpenClaw's configured            │
+   │         vision LLM (no skill-level key       │
+   │         needed)                              │
+   └──────────────────────────────────────────────┘
 ```
 
-You can override this per-use with `--provider claude` or `--provider gemini`.
+Pin a specific provider with `--provider openclaw|gemini|claude`. The
+`gemini` and `claude` choices require the matching API key.
 
-`ANTHROPIC_API_KEY` is optional. Without it, auto mode runs Gemini only with no fallback.
+**v4.2 change:** `GEMINI_API_KEY` is no longer required to install or use
+Scrask. The skill defers to whatever vision LLM OpenClaw is configured
+with, and only uses Gemini if you opt in by setting the key.
 
 ---
 
@@ -107,6 +124,9 @@ openclaw restart
       "scrask-bot": {
         "enabled": true,
         "env": {
+          // Both optional in v4.2+. Without them, Scrask uses OpenClaw's
+          // configured vision LLM. Set GEMINI_API_KEY for cheap+fast routing,
+          // ANTHROPIC_API_KEY for Claude fallback or direct Claude.
           "GEMINI_API_KEY": "AIza-your-gemini-key",
           "ANTHROPIC_API_KEY": "sk-ant-your-key-here"
         },

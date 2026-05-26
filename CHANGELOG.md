@@ -5,6 +5,54 @@ All notable changes to Scrask are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.2.0] - 2026-05-25
+
+### Added
+
+- **OpenClaw as a first-class provider.** New `--provider openclaw`
+  mode uses whichever vision LLM the platform has configured. Scrask
+  reads three env vars OpenClaw injects into skill subprocesses:
+  `OPENCLAW_VISION_PROVIDER` (`"anthropic"` or `"google"`),
+  `OPENCLAW_VISION_KEY`, and optional `OPENCLAW_VISION_MODEL`.
+- **`parse_with_openclaw()`** helper in `scripts/scrask_bot.py`. Routes
+  to the existing `parse_with_claude` or `parse_with_gemini` based on
+  what the platform reports.
+- **Optional `model` parameter** on `parse_with_claude` and
+  `parse_with_gemini`, so the platform can override the default model
+  name without mutating module globals.
+
+### Changed
+
+- **`auto` mode is now credential-aware** rather than Gemini-only:
+  - `GEMINI_API_KEY` set → Gemini-first with Claude fallback (existing
+    v4.1 behaviour, preserved for users who opt in).
+  - Only `ANTHROPIC_API_KEY` set → Claude directly.
+  - Neither set → defer to OpenClaw's configured vision LLM.
+
+  Result: the skill works out of the box for any OpenClaw user with a
+  vision-capable platform LLM. No skill-level API key is required.
+- **`GEMINI_API_KEY` is no longer required.** Removed from
+  `metadata.openclaw.requires.env` in `SKILL.md`; both keys are now
+  listed under `optional_env`. `primaryEnv` removed.
+- **Env-var validation** in `main()` updated. Auto mode no longer
+  errors out when `GEMINI_API_KEY` is missing; it only errors when
+  none of (Gemini key, Claude key, OpenClaw injection) is available.
+- **`_parse_with_auto_fallback` renamed** to
+  `_parse_with_gemini_claude_fallback` for clarity. A new
+  `_parse_with_auto` wraps the credential-aware routing logic.
+- **Docs:** `SKILL.md`, `README.md`, `docs/decision-flow.md`,
+  `docs/decision-flow.html` updated with the new provider model. The
+  parser-side flowchart now shows the auto-routing decision tree.
+
+### Compatibility
+
+- **Fully backward compatible.** Existing users with `GEMINI_API_KEY`
+  set continue to get exactly the same Gemini-first behaviour they
+  had in v4.1. Users with both keys still get Gemini → Claude
+  fallback. Only the failure mode changed: instead of refusing to
+  run, Scrask now uses the platform LLM when no skill-level key is
+  set.
+
 ## [4.1.0] - 2026-05-25
 
 ### Added

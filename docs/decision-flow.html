@@ -328,9 +328,14 @@ flowchart TD
     B --> C["scrask_bot.py runs"]
 
     C --> D{"Provider mode"}
+    D -->|openclaw| OC["OpenClaw configured<br/>vision LLM"]
     D -->|claude| E["Claude Opus parses"]
     D -->|gemini| F["Gemini 2.0 Flash parses"]
-    D -->|auto| G["Gemini 2.0 Flash parses"]
+    D -->|auto| AR{"Which keys are set?"}
+
+    AR -->|GEMINI_API_KEY| G["Gemini 2.0 Flash parses"]
+    AR -->|"ANTHROPIC_API_KEY only"| E
+    AR -->|Neither| OC
 
     G --> H{"Worst per-field<br/>score &lt; 0.60?"}
     H -->|No| K["Use Gemini result"]
@@ -344,6 +349,7 @@ flowchart TD
     F --> M
     K --> M
     L --> M
+    OC --> M
 
     M --> N{"no_actionable_content<br/>OR items empty?"}
     N -->|Yes| O["Return: couldn't find anything"]

@@ -1,22 +1,30 @@
 ---
 name: scrask-bot
-version: 4.1.0
+version: 4.2.0
 description: >
   When the user sends a screenshot via any chat surface (Telegram, iMessage, Slack, etc.),
-  parse it for events and tasks using Gemini (fast, default) with optional Claude fallback,
-  then delegate creation to the user's installed calendar / task skills. Scrask does not
-  write to any store itself — it emits structured intent and the agent routes it.
+  parse it for events and tasks using OpenClaw's configured vision LLM by default, with
+  optional Gemini fast-path and Claude fallback for users who bring their own keys. Then
+  delegate creation to the user's installed calendar / task skills. Scrask does not write
+  to any store itself; it emits structured intent and the agent routes it.
 author: sandip
 metadata:
   openclaw:
     emoji: "🦞"
-    primaryEnv: GEMINI_API_KEY
+    # No mandatory env vars. Default 'auto' provider routing uses OpenClaw's
+    # configured vision LLM when no skill-level keys are set, so the skill works
+    # out of the box.
     requires:
-      env:
-        - GEMINI_API_KEY         # required for auto and gemini modes
-        # - ANTHROPIC_API_KEY   # optional — enables Claude fallback in auto mode
+      env: []
       bins:
         - python3
+    optional_env:
+      # GEMINI_API_KEY: enables the cheap+fast Gemini-first routing in 'auto' mode,
+      #   and is required if you pin --provider gemini.
+      # ANTHROPIC_API_KEY: enables Claude fallback in 'auto' mode (when Gemini
+      #   confidence is shaky), and is required if you pin --provider claude.
+      - GEMINI_API_KEY
+      - ANTHROPIC_API_KEY
     suggests:
       # Calendar destination skills (any one is enough)
       - calctl
@@ -32,8 +40,11 @@ metadata:
       vision_provider:
         type: string
         description: >
-          'auto' = Gemini first, Claude fallback if the worst per-field score is < fallback_threshold.
-          'gemini' = Gemini only. 'claude' = Claude only.
+          'auto' (default) routes by what you have: GEMINI_API_KEY → Gemini-first
+          with Claude fallback; else ANTHROPIC_API_KEY → Claude only; else falls
+          back to OpenClaw's configured vision LLM. 'openclaw' always uses the
+          platform LLM. 'gemini' / 'claude' pin a specific provider (and require
+          the matching key).
         default: auto
       fallback_threshold:
         type: number
@@ -111,8 +122,17 @@ python3 {baseDir}/scripts/scrask_bot.py \
   --field-threshold "$CONFIG_FIELD_THRESHOLD"
 ```
 
-The script auto-resolves the API key from `GEMINI_API_KEY` (and optionally `ANTHROPIC_API_KEY`)
-in the environment — no need to pass it explicitly.
+The script reads credentials from the environment — never pass them on the command line.
+In default `auto` mode it routes by what is available:
+
+- `GEMINI_API_KEY` set → Gemini-first with Claude fallback (cheap + fast path).
+- `ANTHROPIC_API_KEY` set (no Gemini key) → Claude only.
+- Neither set → OpenClaw's configured vision LLM, read from the platform-injected env vars
+  `OPENCLAW_VISION_PROVIDER`, `OPENCLAW_VISION_KEY`, and optional `OPENCLAW_VISION_MODEL`.
+
+So the skill works out of the box for any OpenClaw user with a vision-capable LLM
+configured at the platform level. Bringing your own Gemini key only adds the cost-and-speed
+optimisation on top.
 
 The script returns JSON with:
 
@@ -211,6 +231,11 @@ If the destination skill errors, surface the error and ask whether to retry with
       "scrask-bot": {
         "enabled": true,
         "env": {
+          // Both keys are OPTIONAL in v4.2+. Without either, Scrask uses
+          // OpenClaw's configured vision LLM via the platform-injected
+          // OPENCLAW_VISION_* env vars. Setting GEMINI_API_KEY opts into
+          // the cheap+fast Gemini routing. Setting ANTHROPIC_API_KEY adds
+          // Claude as a fallback (or as the primary if no Gemini key).
           "GEMINI_API_KEY": "AIza-your-gemini-key",
           "ANTHROPIC_API_KEY": "sk-ant-your-key-here"
         },
